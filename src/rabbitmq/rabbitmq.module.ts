@@ -13,10 +13,6 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
                     queue: 'whatsapp_saas_queue',
                     queueOptions: {
                         durable: true,
-                        arguments: {
-                            'x-dead-letter-exchange': '',
-                            'x-dead-letter-routing-key': 'whatsapp_saas_queue_dlq',
-                        },
                     },
                 },
             },

@@ -7,7 +7,7 @@ services:
     ports:
       - "27017:27017"
     environment:
-      - MONGO_INITDB_DATABASE=whatsapp_saas
+      - MONGO_INITDB_DATABASE=whatsapp-saas
     volumes:
       - mongodb_data:/data/db
 

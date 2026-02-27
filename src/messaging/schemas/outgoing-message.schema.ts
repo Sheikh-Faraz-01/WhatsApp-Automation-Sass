@@ -5,20 +5,8 @@ export type OutgoingMessageDocument = OutgoingMessage & Document;
 
 @Schema({ timestamps: true })
 export class OutgoingMessage {
-    @Prop({ required: true, index: true })
+    @Prop({ required: true })
     recipientPhone: string;
-
-    @Prop({ index: true })
-    from?: string;
-
-    @Prop({ index: true })
-    waMessageId?: string;
-
-    @Prop()
-    textBody?: string;
-
-    @Prop()
-    messageType?: string;
 
     @Prop({ type: Object, required: true })
     payload: Record<string, any>;

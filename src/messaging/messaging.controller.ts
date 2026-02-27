@@ -1,9 +1,9 @@
-import { Controller, Logger, Post, Body } from '@nestjs/common';
+import { Controller, Logger } from '@nestjs/common';
 import { EventPattern, Payload, Ctx, RmqContext } from '@nestjs/microservices';
 import { MessagingService } from './messaging.service';
 import { tenantContext } from '../tenant/tenant.context';
 
-@Controller('messaging')
+@Controller()
 export class MessagingController {
     private readonly logger = new Logger(MessagingController.name);
 
@@ -11,6 +11,8 @@ export class MessagingController {
 
     @EventPattern('outgoing.message.queue')
     async handleOutgoingMessage(@Payload() data: any, @Ctx() context: RmqContext) {
+        // Extract workspaceId from payload directly, assuming the producer embeds it
+        // Alternatively, if the producer emits the whole context, we unwrap it
         const workspaceId = data.workspaceId || data.payload?.workspaceId;
 
         if (!workspaceId) {
@@ -18,27 +20,14 @@ export class MessagingController {
             return;
         }
 
+        // Run the service logic inside the Tenant Context to ensure Mongoose logging tags the workspaceId
         await tenantContext.run({ workspaceId }, async () => {
-            this.logger.log(`Processing RMQ outgoing message for workspace ${workspaceId}`);
+            this.logger.log(`Processing outgoing message for workspace ${workspaceId}`);
             try {
                 await this.messagingService.sendWhatsAppMessage(data);
             } catch (error) {
-                this.logger.error(`Failed to process RMQ message for workspace ${workspaceId}`, error);
+                this.logger.error(`Failed to process message for workspace ${workspaceId}`, error);
             }
-        });
-    }
-
-    @Post('send')
-    async sendMessage(@Body() body: any) {
-        const workspaceId = body.workspaceId;
-        if (!workspaceId) {
-            throw new Error('workspaceId is required in body');
-        }
-
-        return await tenantContext.run({ workspaceId }, async () => {
-            this.logger.log(`Direct API call to send message for workspace ${workspaceId}`);
-            await this.messagingService.sendWhatsAppMessage(body);
-            return { success: true, message: 'Message sending initiated' };
         });
     }
 }

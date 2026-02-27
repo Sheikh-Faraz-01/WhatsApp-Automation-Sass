@@ -1,6 +1,5 @@
 import { Module, Global } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
-import { ConfigService } from '@nestjs/config';
 import * as mongoose from 'mongoose';
 import { tenantPlugin } from '../tenant/mongoose-tenant.plugin';
 
@@ -11,9 +10,8 @@ mongoose.plugin(tenantPlugin);
 @Module({
     imports: [
         MongooseModule.forRootAsync({
-            inject: [ConfigService],
-            useFactory: (configService: ConfigService) => ({
-                uri: configService.get<string>('MONGODB_URI')!,
+            useFactory: () => ({
+                uri: process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-saas',
             }),
         }),
     ],

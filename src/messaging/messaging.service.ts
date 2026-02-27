@@ -4,25 +4,31 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { lastValueFrom } from 'rxjs';
 import { OutgoingMessage, OutgoingMessageDocument } from './schemas/outgoing-message.schema';
-import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class MessagingService {
     private readonly logger = new Logger(MessagingService.name);
+    private readonly graphApiVersion = process.env.META_GRAPH_VERSION || 'v19.0';
+    private readonly metaAccessToken = process.env.META_ACCESS_TOKEN || 'test_token';
+    // Note: Phone number ID should ideally be fetched from a Workspace/Config collection based on tenantContext
+    private readonly defaultPhoneNumberId = process.env.META_PHONE_NUMBER_ID || '1234567890';
 
     constructor(
         private readonly httpService: HttpService,
-        private readonly configService: ConfigService,
         @InjectModel(OutgoingMessage.name) private readonly messageModel: Model<OutgoingMessageDocument>,
     ) { }
 
-    private get graphApiVersion() { return this.configService.get<string>('META_GRAPH_VERSION') || 'v19.0'; }
-    private get metaAccessToken() { return this.configService.get<string>('WHATSAPP_ACCESS_TOKEN'); }
-    private get defaultPhoneNumberId() { return this.configService.get<string>('WHATSAPP_PHONE_NUMBER_ID'); }
-
     async sendWhatsAppMessage(data: any): Promise<void> {
         const { to, type, template, text, phoneNumberId = this.defaultPhoneNumberId } = data;
-        const textBody = type === 'text' ? text?.body : (type === 'template' ? `Template: ${template?.name}` : 'Media');
+
+        // Create initial pending log record in MongoDB
+        // Mongoose tenant plugin will automatically set workspaceId
+        const logEntry = new this.messageModel({
+            recipientPhone: to,
+            payload: data,
+            status: 'pending',
+        });
+        await logEntry.save();
 
         const requestPayload = this.buildMetaPayload(to, type, template, text);
         const url = `https://graph.facebook.com/${this.graphApiVersion}/${phoneNumberId}/messages`;
@@ -43,43 +49,23 @@ export class MessagingService {
                     }),
                 );
 
-                const waMessageId = response.data?.messages?.[0]?.id;
-                this.logger.log(`WhatsApp message sent successfully on attempt ${attempt}. ID: ${waMessageId}`);
+                this.logger.log(`WhatsApp message sent successfully on attempt ${attempt}`);
 
-                // PERSISTENCE: Save record AFTER getting the ID from Meta
-                // This prevents race conditions where status webhooks arrive before the save completes
-                const logEntry = new this.messageModel({
-                    waMessageId,
-                    recipientPhone: to,
-                    from: phoneNumberId, // Store who sent it
-                    textBody,
-                    messageType: type,
-                    payload: data,
-                    status: 'sent',
-                    retryCount: attempt,
-                });
+                logEntry.status = 'sent';
+                logEntry.retryCount = attempt;
                 await logEntry.save();
-                this.logger.debug(`Outgoing message persisted: ${waMessageId}`);
-
                 success = true;
 
             } catch (error: any) {
                 this.logger.error(`WhatsApp message failed on attempt ${attempt}: ${error.message}`);
 
                 if (attempt >= maxRetries) {
-                    // Log failure even if no waMessageId exists
-                    const logEntry = new this.messageModel({
-                        recipientPhone: to,
-                        from: phoneNumberId,
-                        textBody,
-                        messageType: type,
-                        payload: data,
-                        status: 'failed',
-                        errorReason: error.response?.data?.error?.message || error.message,
-                        retryCount: attempt,
-                    });
+                    logEntry.status = 'failed';
+                    logEntry.errorReason = error.response?.data?.error?.message || error.message;
+                    logEntry.retryCount = attempt;
                     await logEntry.save();
                 } else {
+                    // Exponential backoff before retry (e.g., 1s, 2s)
                     await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
                 }
             }

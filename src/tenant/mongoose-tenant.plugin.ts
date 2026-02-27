@@ -11,11 +11,12 @@ export function tenantPlugin(schema: Schema) {
         }
     };
 
-    const addWorkspaceIdToDoc = function (this: any) {
+    const addWorkspaceIdToDoc = function (this: any, next: (err?: import("mongoose").CallbackError) => void) {
         const context = tenantContext.getStore();
         if (context && context.workspaceId) {
             this.workspaceId = context.workspaceId;
         }
+        next();
     };
 
     // Find hooks
@@ -32,8 +33,8 @@ export function tenantPlugin(schema: Schema) {
     // @ts-ignore
     schema.pre('count', addWorkspaceIdToQuery); // deprecated but sometimes used
 
-    // Document Validation hook
-    schema.pre('validate', addWorkspaceIdToDoc);
+    // Document Save hook
+    schema.pre('save', addWorkspaceIdToDoc);
 
     // Aggregate hook to inject $match for workspaceId at the start of the pipeline
     schema.pre('aggregate', function () {
