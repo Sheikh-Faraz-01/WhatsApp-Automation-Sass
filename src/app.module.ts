@@ -14,6 +14,8 @@ import { MessagingModule } from './messaging/messaging.module';
 import { DatabaseModule } from './database/database.module';
 import { RabbitMQModule } from './rabbitmq/rabbitmq.module';
 import { TenantModule } from './tenant/tenant.module';
+import { IncomingModule } from './incoming/incoming.module';
+import { ConversationModule } from './conversation/conversation.module';
 @Module({
   imports: [
     AuthModule,
@@ -28,7 +30,9 @@ import { TenantModule } from './tenant/tenant.module';
     MessagingModule,
     DatabaseModule,
     RabbitMQModule,
-    TenantModule
+    TenantModule,
+    IncomingModule,
+    ConversationModule,
   ],
   controllers: [AppController],
   providers: [AppService],

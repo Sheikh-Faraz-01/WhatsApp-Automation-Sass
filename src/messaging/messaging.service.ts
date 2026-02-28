@@ -1,42 +1,45 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { HttpService } from '@nestjs/axios';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { lastValueFrom } from 'rxjs';
-import { OutgoingMessage, OutgoingMessageDocument } from './schemas/outgoing-message.schema';
+﻿import { Injectable, Logger } from "@nestjs/common";
+import { HttpService } from "@nestjs/axios";
+import { InjectModel } from "@nestjs/mongoose";
+import { Model } from "mongoose";
+import { lastValueFrom } from "rxjs";
+import { OutgoingMessage, OutgoingMessageDocument } from "./schemas/outgoing-message.schema";
+import { ConversationService } from "../conversation/conversation.service";
 
 @Injectable()
 export class MessagingService {
     private readonly logger = new Logger(MessagingService.name);
-    private readonly graphApiVersion = process.env.META_GRAPH_VERSION || 'v19.0';
-    private readonly metaAccessToken = process.env.META_ACCESS_TOKEN || 'test_token';
-    // Note: Phone number ID should ideally be fetched from a Workspace/Config collection based on tenantContext
-    private readonly defaultPhoneNumberId = process.env.META_PHONE_NUMBER_ID || '1234567890';
+    private readonly graphApiVersion = process.env.META_GRAPH_VERSION || "v19.0";
+    private readonly metaAccessToken = process.env.META_ACCESS_TOKEN || "test_token";
+    private readonly defaultPhoneNumberId = process.env.META_PHONE_NUMBER_ID || "1234567890";
 
     constructor(
         private readonly httpService: HttpService,
-        @InjectModel(OutgoingMessage.name) private readonly messageModel: Model<OutgoingMessageDocument>,
-    ) { }
+        @InjectModel(OutgoingMessage.name) private readonly outgoingModel: Model<OutgoingMessageDocument>,
+        private readonly conversationService: ConversationService,
+    ) {}
 
     async sendWhatsAppMessage(data: any): Promise<void> {
-        const { to, type, template, text, phoneNumberId = this.defaultPhoneNumberId } = data;
+        const {
+            workspaceId,
+            to,
+            type,
+            template,
+            text: textPayload,
+            phoneNumberId = this.defaultPhoneNumberId,
+        } = data;
 
-        // Create initial pending log record in MongoDB
-        // Mongoose tenant plugin will automatically set workspaceId
-        const logEntry = new this.messageModel({
-            recipientPhone: to,
-            payload: data,
-            status: 'pending',
-        });
-        await logEntry.save();
-
-        const requestPayload = this.buildMetaPayload(to, type, template, text);
+        const requestPayload = this.buildMetaPayload(to, type, template, textPayload);
         const url = `https://graph.facebook.com/${this.graphApiVersion}/${phoneNumberId}/messages`;
+        const sentAt = new Date();
 
+        let whatsappMessageId: string | null = null;
         let success = false;
         let attempt = 0;
+        let lastError: any = null;
         const maxRetries = 3;
 
+        // ── Retry loop: call Meta Graph API ───────────────────────────────────────
         while (attempt < maxRetries && !success) {
             attempt++;
             try {
@@ -44,47 +47,92 @@ export class MessagingService {
                     this.httpService.post(url, requestPayload, {
                         headers: {
                             Authorization: `Bearer ${this.metaAccessToken}`,
-                            'Content-Type': 'application/json',
+                            "Content-Type": "application/json",
                         },
                     }),
                 );
 
-                this.logger.log(`WhatsApp message sent successfully on attempt ${attempt}`);
-
-                logEntry.status = 'sent';
-                logEntry.retryCount = attempt;
-                await logEntry.save();
+                // Meta API returns { messages: [{ id: "wamid.xxx" }] }
+                whatsappMessageId = response.data?.messages?.[0]?.id ?? null;
+                this.logger.log(`WhatsApp message sent on attempt ${attempt}. wamid: ${whatsappMessageId}`);
                 success = true;
 
             } catch (error: any) {
-                this.logger.error(`WhatsApp message failed on attempt ${attempt}: ${error.message}`);
+                lastError = error;
+                this.logger.error(`WhatsApp send failed on attempt ${attempt}: ${error.message}`);
 
-                if (attempt >= maxRetries) {
-                    logEntry.status = 'failed';
-                    logEntry.errorReason = error.response?.data?.error?.message || error.message;
-                    logEntry.retryCount = attempt;
-                    await logEntry.save();
-                } else {
-                    // Exponential backoff before retry (e.g., 1s, 2s)
-                    await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+                if (attempt < maxRetries) {
+                    await new Promise((r) => setTimeout(r, attempt * 1000));
                 }
+            }
+        }
+
+        // ── Persist OutgoingMessage ───────────────────────────────────────────────
+        const plainText: string | undefined =
+            type === "text" && textPayload?.body ? textPayload.body : undefined;
+
+        try {
+            const doc = new this.outgoingModel({
+                workspaceId: workspaceId ?? "unknown",
+                phoneNumberId,
+                to,
+                messageId: whatsappMessageId,   // null for failed sends (sparse index skips it)
+                type,
+                text: plainText,
+                timestamp: sentAt,
+                direction: "outbound",
+                status: success ? "sent" : "failed",
+                errorReason: success
+                    ? null
+                    : (lastError?.response?.data?.error?.message ?? lastError?.message),
+                retryCount: attempt,
+            });
+            await doc.save();
+            this.logger.log(`OutgoingMessage persisted (status=${success ? "sent" : "failed"})`);
+        } catch (dbErr: any) {
+            this.logger.error("Failed to persist outgoing message to MongoDB", dbErr.stack);
+            // Best-effort — do not rethrow; message was already sent (or attempted)
+        }
+
+        // ── Update Conversation (only if workspaceId is known) ────────────────────
+        if (workspaceId) {
+            const lastMessage = plainText ?? `[${type ?? "unknown"}]`;
+            try {
+                if (success) {
+                    // Successful outbound: update preview + reset unread count
+                    await this.conversationService.upsertFromOutboundMessage({
+                        workspaceId,
+                        phoneNumberId,
+                        contact: to,
+                        lastMessage,
+                        lastMessageAt: sentAt,
+                    });
+                } else {
+                    // Failed send: update preview only, leave unreadCount untouched
+                    await this.conversationService.updateLastMessageOnFailure({
+                        workspaceId,
+                        phoneNumberId,
+                        contact: to,
+                        lastMessage: `[failed] ${lastMessage}`,
+                        lastMessageAt: sentAt,
+                    });
+                }
+            } catch (convErr: any) {
+                this.logger.error("Conversation update failed after outbound send", convErr.stack);
             }
         }
     }
 
-    private buildMetaPayload(to: string, type: 'template' | 'text', template?: any, text?: any) {
+    private buildMetaPayload(to: string, type: "template" | "text", template?: any, text?: any) {
         const payload: any = {
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
             to,
             type,
         };
 
-        if (type === 'template' && template) {
-            payload.template = template;
-        } else if (type === 'text' && text) {
-            payload.text = text;
-        }
+        if (type === "template" && template) payload.template = template;
+        else if (type === "text" && text) payload.text = text;
 
         return payload;
     }
